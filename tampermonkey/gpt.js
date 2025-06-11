@@ -1,17 +1,17 @@
 // ==UserScript==
-// @name         ChatGPT Fuzzy Model Picker & Force Model v2.6
+// @name         ChatGPT Fuzzy Model Picker & Force Model v2.8 (cleaned)
 // @namespace    http://tampermonkey.net/
-// @version      0.9.3
-// @description  ⌘+⇧+1 opens a fuzzy-search model picker; forces all chat fetches to use the selected model; highlights current model and always shows first fuzzy-match (whitespace-safe filtering).
+// @version      0.9.5
+// @description  Adds a side panel with model descriptions; original picker unchanged.
 // @match        https://chatgpt.com/*
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
 
-(function () {
+(function() {
   'use strict';
 
-  /* ── 1. Model definitions ─────────────────────────────────────────────── */
+  // ── 1. Model and Description Definitions ───────────────────────────────
   const MODELS = [
     { id: 'gpt-4-1-mini', label: 'GPT-4.1 Mini' },
     { id: 'o4-mini-high', label: 'o4-mini-high' },
@@ -23,28 +23,41 @@
     { id: 'gpt-4-1',      label: 'GPT-4.1' },
   ];
 
-  /* ── 2. State ─────────────────────────────────────────────────────────── */
-  const DEFAULT_ID   = 'o4-mini-high';
-  const storedId     = localStorage.getItem('tm-current-model');
-  const urlId        = new URL(location.href).searchParams.get('model');
-  let   current      = MODELS.find(m => m.id === (urlId || storedId)) ??
-                       MODELS.find(m => m.id === DEFAULT_ID);
-  let   lastUrlModel = current.id;
+  const DESCRIPTIONS = {
+    'gpt-4o'      : 'Great for most tasks',
+    'o3'          : 'Uses advanced reasoning',
+    'o4-mini'     : 'Fastest at advanced reasoning',
+    'o4-mini-high': 'Great at coding and visual reasoning',
+    'gpt-4-5'     : 'Good for writing and exploring ideas',
+    'gpt-4-1'     : 'Great for quick coding and analysis',
+    'gpt-4-1-mini': 'Faster for everyday tasks',
+  };
 
-  function setCurrent(id) {
-    const hit = MODELS.find(m => m.id === id);
-    if (!hit || hit.id === current.id) return;
-    current = hit;
-    localStorage.setItem('tm-current-model', current.id);
+  // ── 2. State Initialization ────────────────────────────────────────────
+  const DEFAULT_MODEL_ID = 'o4-mini-high';
+  const storedModelId    = localStorage.getItem('tm-current-model');
+  const urlModelId       = new URL(location.href).searchParams.get('model');
+
+  let currentModel = MODELS.find(m => m.id === (urlModelId || storedModelId))
+                   || MODELS.find(m => m.id === DEFAULT_MODEL_ID);
+
+  let lastUrlModel = currentModel.id;
+  let highlightedItem = null;
+
+  function setCurrentModel(modelId) {
+    const found = MODELS.find(m => m.id === modelId);
+    if (!found || found.id === currentModel.id) return;
+    currentModel = found;
+    localStorage.setItem('tm-current-model', currentModel.id);
   }
 
-  /* ── 3. URL helpers ───────────────────────────────────────────────────── */
-  function updateUrlModel(id) {
-    const u = new URL(location.href);
-    if (u.searchParams.get('model') === id) return;
-    u.searchParams.set('model', id);
-    history.pushState({}, '', u);
-    lastUrlModel = id;
+  // ── 3. URL Sync Helpers ────────────────────────────────────────────────
+  function updateUrlModel(modelId) {
+    const url = new URL(location.href);
+    if (url.searchParams.get('model') === modelId) return;
+    url.searchParams.set('model', modelId);
+    history.pushState({}, '', url);
+    lastUrlModel = modelId;
   }
 
   function startUrlWatcher(interval = 1000) {
@@ -52,32 +65,55 @@
       const now = new URL(location.href).searchParams.get('model');
       if (now && now !== lastUrlModel) {
         lastUrlModel = now;
-        setCurrent(now);
-        updateHeader();
-        updateCurrentClasses();
+        setCurrentModel(now);
+        refreshPickerHeader();
+        refreshPickerClasses();
+        refreshDetailClasses();
       }
     }, interval);
   }
 
-  /* ── 4. Patch fetch ───────────────────────────────────────────────────── */
-  window.fetch = ((orig) => async (input, init = {}) => {
-    const req = input instanceof Request ? input : new Request(input, init);
-    if (req.url.includes('/backend-api/conversation') && req.method.toUpperCase() === 'POST') {
+  // ── 4. Force Model on Fetch ─────────────────────────────────────────────
+  window.fetch = ((origFetch) => async (input, init = {}) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (request.url.includes('/backend-api/conversation')
+        && request.method.toUpperCase() === 'POST') {
       try {
-        const raw  = await req.clone().text();
-        const body = JSON.parse(raw);
-        if (body.model && body.model !== current.id) {
-          body.model = current.id;
-          return orig(new Request(req, { body: JSON.stringify(body) }));
+        const text   = await request.clone().text();
+        const body   = JSON.parse(text);
+        if (body.model && body.model !== currentModel.id) {
+          body.model = currentModel.id;
+          return origFetch(new Request(request, { body: JSON.stringify(body) }));
         }
-      } catch { /* fall through */ }
+      } catch {
+        // parsing failed, continue with original request
+      }
     }
-    return orig(input, init);
+    return origFetch(input, init);
   })(window.fetch);
 
-  /* ── 5. Inject styles for “current” marker ─────────────────────────────── */
-  const style = document.createElement('style');
-  style.textContent = `
+  // ── 5. Analytics & Cookie Helpers ───────────────────────────────────────
+  function sendAnalytics(from, to) {
+    try {
+      if (window.analytics?.track) {
+        window.analytics.track('Model Switcher Model Changed', {
+          from, to, origin: 'tampermonkey'
+        });
+      }
+    } catch {
+      // ignore analytics errors
+    }
+  }
+
+  function setCookie(name, value, days = 365) {
+    const expires = new Date(Date.now() + days * 864e5).toUTCString();
+    document.cookie = `${name}=${value}; expires=${expires}; path=/; secure; sameSite=Lax`;
+  }
+
+  // ── 6. Inject Styles ────────────────────────────────────────────────────
+  const styleEl = document.createElement('style');
+  styleEl.textContent = `
+    /* current model highlight */
     li.current {
       background-color: rgba(74,144,230,0.2) !important;
     }
@@ -90,187 +126,290 @@
       font-size: 13px;
       color: #4ea1f3;
     }
+    /* detail panel text */
+    .tm-detail-title { font-weight: 600; }
+    .tm-detail-desc  { font-size: 12px; color: #aaa; }
   `;
-  document.head.appendChild(style);
+  document.head.appendChild(styleEl);
 
-  /* ── 6. Build picker UI ───────────────────────────────────────────────── */
-  const overlay = document.createElement('div');
-  Object.assign(overlay.style, {
-    position: 'fixed', top: '50%', left: '50%',
+  // ── 7. Build Picker UI ──────────────────────────────────────────────────
+  const overlayEl = document.createElement('div');
+  Object.assign(overlayEl.style, {
+    position: 'fixed',
+    top: '50%',
+    left: '50%',
     transform: 'translate(-50%,-50%)',
-    background: '#343540', color: '#fff',
-    padding: '16px', borderRadius: '8px',
+    background: '#343540',
+    color: '#fff',
+    padding: '16px',
+    borderRadius: '8px',
     boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
-    zIndex: 999999, width: '320px',
-    display: 'none', fontFamily: 'sans-serif'
+    zIndex: 999999,
+    width: '320px',
+    display: 'none',
+    fontFamily: 'sans-serif'
   });
 
-  /* Header note – current model */
-  const header = document.createElement('div');
-  Object.assign(header.style, {
-    fontSize: '12px', color: '#aaa', marginBottom: '6px', textAlign: 'center'
+  const headerEl = document.createElement('div');
+  Object.assign(headerEl.style, {
+    fontSize: '12px',
+    color: '#aaa',
+    marginBottom: '6px',
+    textAlign: 'center'
   });
-  overlay.appendChild(header);
+  overlayEl.appendChild(headerEl);
 
-  /* Search box */
-  const inp = document.createElement('input');
-  Object.assign(inp.style, {
-    width: '100%', padding: '8px', marginBottom: '8px',
-    borderRadius: '4px', border: '1px solid #555',
-    background: '#202123', color: '#fff', fontSize: '14px'
+  const inputEl = document.createElement('input');
+  Object.assign(inputEl.style, {
+    width: '100%',
+    padding: '8px',
+    marginBottom: '8px',
+    borderRadius: '4px',
+    border: '1px solid #555',
+    background: '#202123',
+    color: '#fff',
+    fontSize: '14px'
   });
-  inp.placeholder = 'Type to filter…';
-  overlay.appendChild(inp);
+  inputEl.placeholder = 'Type to filter…';
+  overlayEl.appendChild(inputEl);
 
-  /* List */
-  const list = document.createElement('ul');
-  Object.assign(list.style, {
-    listStyle: 'none', padding: 0, margin: 0,
-    maxHeight: '200px', overflowY: 'auto', position: 'relative'
+  const listEl = document.createElement('ul');
+  Object.assign(listEl.style, {
+    listStyle: 'none',
+    padding: 0,
+    margin: 0,
+    maxHeight: '200px',
+    overflowY: 'auto',
+    position: 'relative'
   });
-  overlay.appendChild(list);
+  overlayEl.appendChild(listEl);
 
-  MODELS.forEach(m => {
-    const li = document.createElement('li');
-    li.dataset.id = m.id;
-    li.textContent = m.label;
-    li.tabIndex = 0;
-    Object.assign(li.style, {
-      padding: '6px 8px', cursor: 'pointer', borderRadius: '4px', position: 'relative'
+  MODELS.forEach(model => {
+    const item = document.createElement('li');
+    item.dataset.id = model.id;
+    item.textContent = model.label;
+    item.tabIndex = 0;
+    Object.assign(item.style, {
+      padding: '6px 8px',
+      cursor: 'pointer',
+      borderRadius: '4px',
+      position: 'relative'
     });
-    li.classList.toggle('current', m.id === current.id);
-    li.addEventListener('click', () => selectModel(m.id));
-    li.addEventListener('mouseenter', () => highlight(li));
-    list.appendChild(li);
+    item.classList.toggle('current', model.id === currentModel.id);
+    item.addEventListener('click', () => selectModel(model.id));
+    item.addEventListener('mouseenter', () => highlightItem(item));
+    listEl.appendChild(item);
   });
 
-  document.body.appendChild(overlay);
+  document.body.appendChild(overlayEl);
 
-  /* ── 7. Picker logic ──────────────────────────────────────────────────── */
-  let highlighted       = null;
-  let clickListenerLive = false;
-  let inputListenerLive = false;
+  // ── 8. Build Detail Panel ───────────────────────────────────────────────
+  const detailPanelEl = document.createElement('div');
+  Object.assign(detailPanelEl.style, {
+    position: 'fixed',
+    top: '50%',
+    left: 'calc(50% + 360px)',
+    transform: 'translate(-50%,-50%)',
+    background: '#2a2b2e',
+    color: '#fff',
+    padding: '16px',
+    borderRadius: '8px',
+    boxShadow: '0 10px 30px rgba(0,0,0,0.5)',
+    zIndex: 999999,
+    width: '300px',
+    display: 'none',
+    fontFamily: 'sans-serif'
+  });
 
-  function updateHeader() {
-    header.textContent = `Currently selected: ${current.label}`;
+  const detailListEl = document.createElement('ul');
+  Object.assign(detailListEl.style, {
+    listStyle: 'none',
+    padding: 0,
+    margin: 0
+  });
+
+  MODELS.forEach(model => {
+    const detailItem = document.createElement('li');
+    detailItem.dataset.id = model.id;
+    Object.assign(detailItem.style, {
+      padding: '6px 8px',
+      borderRadius: '4px',
+      position: 'relative'
+    });
+    detailItem.innerHTML = `
+      <div class="tm-detail-title">${model.label}</div>
+      <div class="tm-detail-desc">${DESCRIPTIONS[model.id] || ''}</div>
+    `;
+    detailListEl.appendChild(detailItem);
+  });
+
+  detailPanelEl.appendChild(detailListEl);
+  document.body.appendChild(detailPanelEl);
+
+  // ── 9. Picker Logic ─────────────────────────────────────────────────────
+  let clickListenerActive = false;
+  let inputListenerActive = false;
+
+  function refreshPickerHeader() {
+    headerEl.textContent = `Currently selected: ${currentModel.label}`;
   }
 
-  function updateCurrentClasses() {
-    list.childNodes.forEach(li => {
-      li.classList.toggle('current', li.dataset.id === current.id);
+  function refreshPickerClasses() {
+    listEl.childNodes.forEach(li => {
+      li.classList.toggle('current', li.dataset.id === currentModel.id);
     });
   }
 
-  function fuzzy(needle, hay) {
+  function refreshDetailClasses() {
+    detailListEl.childNodes.forEach(li => {
+      const isCurrent = li.dataset.id === currentModel.id
+                      || li.dataset.id === highlightedItem?.dataset?.id;
+      li.classList.toggle('current', isCurrent);
+    });
+  }
+
+  function fuzzyMatch(pattern, text) {
     let i = 0, j = 0;
-    needle = needle.toLowerCase();
-    hay    = hay.toLowerCase();
-    while (i < needle.length && j < hay.length) {
-      if (needle[i] === hay[j]) i++;
+    pattern = pattern.toLowerCase();
+    text    = text.toLowerCase();
+    while (i < pattern.length && j < text.length) {
+      if (pattern[i] === text[j]) i++;
       j++;
     }
-    return i === needle.length;
+    return i === pattern.length;
   }
 
   function filterList() {
-    const q = inp.value.trim().toLowerCase();        // <-- trim fixes whitespace bug
+    const query = inputEl.value.trim().toLowerCase();
     let firstVisible = null;
 
-    list.childNodes.forEach(li => {
-      const ok = !q || fuzzy(q, li.textContent);
-      li.style.display    = ok ? '' : 'none';
+    listEl.childNodes.forEach(li => {
+      const matches = !query || fuzzyMatch(query, li.textContent);
+      li.style.display = matches ? '' : 'none';
       li.style.background = '';
-      if (ok && !firstVisible) firstVisible = li;
+      if (matches && firstVisible === null) {
+        firstVisible = li;
+      }
     });
 
-    if (firstVisible) highlight(firstVisible);
+    if (firstVisible) {
+      highlightItem(firstVisible);
+    }
   }
 
-  function highlight(li) {
-    if (highlighted) highlighted.style.background = '';
-    highlighted = li;
-    if (li) li.style.background = '#555';
+  function highlightItem(item) {
+    if (highlightedItem) {
+      highlightedItem.style.background = '';
+    }
+    highlightedItem = item;
+    item.style.background = '#555';
+    refreshDetailClasses();
   }
 
   function openPicker() {
-    overlay.style.display = 'block';
-    inp.value = '';
-    updateHeader();
-    updateCurrentClasses();
+    overlayEl.style.display      = 'block';
+    detailPanelEl.style.display  = 'block';
+    inputEl.value                = '';
+    refreshPickerHeader();
+    refreshPickerClasses();
+    refreshDetailClasses();
     filterList();
-    inp.focus();
+    inputEl.focus();
 
-    if (!clickListenerLive) {
-      document.addEventListener('click', outsideClick);
-      clickListenerLive = true;
+    if (!clickListenerActive) {
+      document.addEventListener('click', handleOutsideClick);
+      clickListenerActive = true;
     }
-    if (!inputListenerLive) {
-      inp.addEventListener('input', filterList);   // real-time update
-      inputListenerLive = true;
+
+    if (!inputListenerActive) {
+      inputEl.addEventListener('input', filterList);
+      inputListenerActive = true;
     }
-    inp.addEventListener('keydown', onKeydown);
+
+    inputEl.addEventListener('keydown', handleKeydown);
   }
 
   function closePicker() {
-    overlay.style.display = 'none';
-    if (highlighted) highlighted.style.background = '';
-    highlighted = null;
+    overlayEl.style.display     = 'none';
+    detailPanelEl.style.display = 'none';
 
-    if (clickListenerLive) {
-      document.removeEventListener('click', outsideClick);
-      clickListenerLive = false;
+    if (highlightedItem) {
+      highlightedItem.style.background = '';
     }
-    if (inputListenerLive) {
-      inp.removeEventListener('input', filterList);
-      inputListenerLive = false;
+    highlightedItem = null;
+
+    if (clickListenerActive) {
+      document.removeEventListener('click', handleOutsideClick);
+      clickListenerActive = false;
     }
-    inp.removeEventListener('keydown', onKeydown);
+
+    if (inputListenerActive) {
+      inputEl.removeEventListener('input', filterList);
+      inputListenerActive = false;
+    }
+
+    inputEl.removeEventListener('keydown', handleKeydown);
   }
 
-  function outsideClick(e) {
-    if (!overlay.contains(e.target)) closePicker();
+  function handleOutsideClick(event) {
+    if (!overlayEl.contains(event.target)
+        && !detailPanelEl.contains(event.target)) {
+      closePicker();
+    }
   }
 
-  function selectModel(id) {
-    setCurrent(id);
-    updateUrlModel(current.id);
-    updateHeader();
-    updateCurrentClasses();
+  function selectModel(modelId) {
+    const previousId = currentModel.id;
+    setCurrentModel(modelId);
+    updateUrlModel(currentModel.id);
+    refreshPickerHeader();
+    refreshPickerClasses();
+    refreshDetailClasses();
+    setCookie('oai-last-model', currentModel.id);
+    sendAnalytics(previousId, currentModel.id);
     closePicker();
   }
 
-  function onKeydown(e) {
-    const items = Array.from(list.childNodes)
-                       .filter(li => li.style.display !== 'none');
-    if (!items.length) return;
+  function handleKeydown(event) {
+    const visibleItems = Array.from(listEl.childNodes)
+      .filter(li => li.style.display !== 'none');
+    if (visibleItems.length === 0) return;
 
-    let idx = items.indexOf(highlighted);
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      idx = (idx + 1) % items.length;
-      highlight(items[idx]);
-      items[idx].scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      idx = (idx - 1 + items.length) % items.length;
-      highlight(items[idx]);
-      items[idx].scrollIntoView({ block: 'nearest' });
-    } else if (e.key === 'Enter') {
-      e.preventDefault();
-      if (highlighted) selectModel(highlighted.dataset.id);
+    let index = visibleItems.indexOf(highlightedItem);
+
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      index = (index + 1) % visibleItems.length;
+      highlightItem(visibleItems[index]);
+      visibleItems[index].scrollIntoView({ block: 'nearest' });
+
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      index = (index - 1 + visibleItems.length) % visibleItems.length;
+      highlightItem(visibleItems[index]);
+      visibleItems[index].scrollIntoView({ block: 'nearest' });
+
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      if (highlightedItem) {
+        selectModel(highlightedItem.dataset.id);
+      }
     }
-    /* no default “else” debounce needed – real-time ‘input’ handles filtering */
   }
 
-  /* ── 8. Kick things off ──────────────────────────────────────────────── */
+  // ── 10. Initialize ─────────────────────────────────────────────────────
   startUrlWatcher();
-  updateHeader();
+  refreshPickerHeader();
 
-  /* Toggle picker on ⌘+⇧+1 */
-  window.addEventListener('keydown', e => {
-    if (e.metaKey && e.shiftKey && e.key === '1') {
-      e.preventDefault();
-      overlay.style.display === 'none' ? openPicker() : closePicker();
+  window.addEventListener('keydown', event => {
+    if (event.metaKey && event.shiftKey && event.key === '1') {
+      event.preventDefault();
+      if (overlayEl.style.display === 'none') {
+        openPicker();
+      } else {
+        closePicker();
+      }
     }
   });
+
 })();
