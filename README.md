@@ -57,7 +57,7 @@ Whether it’s refining the fuzzy-find logic, adding new models, or improving th
 ---
 ## 🤖 Built with ChatGPT
 
-This userscript was crafted through an interactive session with ChatGPT over a 2hr period:
+This userscript was vibe coded through an interactive session with ChatGPT over a 2hr period:
 
 1. **Prototype:** started with a simple Tampermonkey script to open and engage with the ChatGPT model dropdown. This proved too difficult to reverse-engineer.
 2. **Pivot:** after exploring network calls made when a new chat was sent, pivoted to adding a fetch override to force the chosen model on outgoing requests
